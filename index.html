@@ -1,0 +1,361 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Career Quest — Pixel Tilemap (Champion Island style)</title>
+  <style>
+    :root{--ink:#e6eef8;--muted:#9fb0c8;--accent:#60a5fa;--brand:#10b981}
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,Helvetica,Arial}
+    body{background:#03131f;color:var(--ink);display:flex;flex-direction:column}
+    header{display:flex;align-items:center;justify-content:space-between;padding:12px 18px;background:linear-gradient(180deg,rgba(3,7,18,.6),rgba(3,7,18,.4));}
+    header h1{margin:0;font-size:18px}
+    .game{display:flex;gap:12px;padding:12px}
+    .sidebar{width:260px;background:linear-gradient(180deg,#071225,#041124);border-radius:10px;padding:12px;border:1px solid rgba(255,255,255,.03)}
+    .viewport{width:840px;height:560px;border-radius:10px;overflow:hidden;background:#0b2440;position:relative}
+    canvas{display:block}
+    .hud{color:var(--muted);font-size:13px}
+    .badges{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+    .badge{padding:6px 8px;border-radius:999px;background:#071823;border:1px solid rgba(255,255,255,.02)}
+    button{background:#0b1225;color:var(--ink);border:1px solid #163048;padding:8px 10px;border-radius:8px;cursor:pointer}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Career Quest — Pixel Tilemap</h1>
+    <div>
+      <button id="btnReset">Reset</button>
+    </div>
+  </header>
+
+  <div class="game">
+    <aside class="sidebar">
+      <div class="hud">
+        <div id="status">WASD / Arrow keys to move. Player centered.</div>
+        <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center"><strong>Badges</strong><span id="count">0/5</span></div>
+        <div class="badges" id="badgeShelf"></div>
+        <hr style="margin-top:8px;border:none;border-top:1px solid rgba(255,255,255,.03)" />
+        <p style="color:var(--muted);font-size:13px">This demo uses a remote Kenney tileset. If the tileset fails to load you can replace the <code>tilesetURL</code> variable with your own sprite sheet URL.</p>
+      </div>
+    </aside>
+
+    <div class="viewport">
+      <canvas id="gameCanvas" width="840" height="560"></canvas>
+    </div>
+  </div>
+
+  <script>
+    /* Tilemap demo (50x50) - readable mapping
+       Legend (map values):
+         0 = water
+         1 = grass
+         2 = sand (beach)
+         3 = tree (solid)
+         4 = path / bridge (walkable)
+         5 = shrine / building (walkable, badge)
+    */
+
+    // -- config
+    const TILE_SIZE = 32;           // pixels per tile in tileset and rendering
+    const MAP_W = 50, MAP_H = 50;   // handcrafted map size
+    const VIEW_W = 840, VIEW_H = 560;
+
+    // tileset source (Kenney-ish). You can replace this with any tile sprite that uses 32x32 tiles.
+    const tilesetURL = 'https://raw.githubusercontent.com/kenneyNL/kenney.nl-assets/master/Platformer%20Pack/tilesheet.png';
+    // Note: if the above link fails, swap for another 32x32 tileset URL.
+
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // world state
+    const world = {
+      map: Array.from({length:MAP_H},()=>Array.from({length:MAP_W},()=>0)),
+      player: {x: Math.floor(MAP_W/2), y: Math.floor(MAP_H/2), px:0, py:0, speed:5},
+      badges: new Set(),
+    };
+
+    // career shrine positions (tile coords). We'll place 5 shrines for careers.
+    const CAREERS = [
+      {id:'medicine', title:'Medicine', emoji:'🩺', x: Math.floor(MAP_W/2), y: Math.floor(MAP_H/2)},
+      {id:'law', title:'Law', emoji:'⚖️', x: MAP_W-8, y: 8},
+      {id:'journalism', title:'Journalism', emoji:'📰', x: MAP_W-12, y: MAP_H-20},
+      {id:'engineering', title:'Engineering', emoji:'🛠️', x: 8, y: MAP_H-10},
+      {id:'arts', title:'Arts', emoji:'🎨', x: MAP_W-6, y: MAP_H-6}
+    ];
+
+    // tile -> tilesheet sx,sy mapping (in tiles, not pixels). We'll attempt to map readable tiles to the tileset.
+    // These coordinates will depend on the tileset you use. If your tileset arranges tiles differently, change these numbers.
+    const TILE_MAP = {
+      0: {sx:0, sy:0},   // water tile (example)
+      1: {sx:2, sy:0},   // grass
+      2: {sx:1, sy:0},   // sand
+      3: {sx:5, sy:0},   // tree
+      4: {sx:4, sy:0},   // path / bridge
+      5: {sx:6, sy:0},   // shrine/building
+    };
+
+    // Load tileset image
+    const tileset = new Image();
+    tileset.crossOrigin = 'anonymous';
+    tileset.src = tilesetURL;
+    tileset.addEventListener('error', ()=>{
+      document.getElementById('status').textContent = 'Tileset failed to load — replace tilesetURL with a working 32x32 tilesheet.';
+      // fallback: draw simple colored rectangles so the demo still runs
+      drawFallback = true;
+    });
+
+    let drawFallback = false;
+
+    // --- build a handcrafted island map programmatically (readable steps) ---
+    function buildMap(){
+      // 1) Fill with water
+      for(let y=0;y<MAP_H;y++) for(let x=0;x<MAP_W;x++) world.map[y][x] = 0;
+
+      // 2) Central island (large oval)
+      const cx = Math.floor(MAP_W/2), cy = Math.floor(MAP_H/2);
+      for(let y=-10;y<=10;y++){
+        for(let x=-14;x<=14;x++){
+          const rx = cx + x, ry = cy + y;
+          const d = (x*x)/(14*14) + (y*y)/(10*10);
+          if(rx>=2 && rx<MAP_W-2 && ry>=2 && ry<MAP_H-2 && d < 1){
+            // inner area grass
+            world.map[ry][rx] = 1;
+          }
+        }
+      }
+      // central plaza path
+      for(let x=cx-3;x<=cx+3;x++) world.map[cy][x] = 4;
+      for(let y=cy-3;y<=cy+3;y++) world.map[y][cx] = 4;
+      world.map[cy][cx] = 5; // central shrine (could be Career Master)
+
+      // 3) Surround grass edges with sand (beaches) by scanning
+      for(let y=1;y<MAP_H-1;y++){
+        for(let x=1;x<MAP_W-1;x++){
+          if(world.map[y][x] === 1){
+            // if adjacent to water, make neighbor sand
+            const adj = [[1,0],[-1,0],[0,1],[0,-1]];
+            adj.forEach(([dx,dy])=>{
+              const nx=x+dx, ny=y+dy;
+              if(world.map[ny][nx] === 0) world.map[ny][nx] = 2;
+            });
+          }
+        }
+      }
+
+      // 4) Place smaller career islands with bridges and shrines
+      function placeIsland(ix,iy, radX=4, radY=3){
+        for(let y=-radY;y<=radY;y++){
+          for(let x=-radX;x<=radX;x++){
+            const rx=ix+x, ry=iy+y;
+            if(rx>1 && rx<MAP_W-2 && ry>1 && ry<MAP_H-2){
+              const d = (x*x)/(radX*radX) + (y*y)/(radY*radY);
+              if(d<=1){ world.map[ry][rx] = 1; }
+            }
+          }
+        }
+        // sand edges
+        for(let y=iy-radY-1;y<=iy+radY+1;y++) for(let x=ix-radX-1;x<=ix+radX+1;x++){
+          if(world.map[y] && world.map[y][x] === 0){ world.map[y][x] = 2; }
+        }
+      }
+
+      // place 4 career islands roughly in corners-ish
+      placeIsland(CAREERS[1].x, CAREERS[1].y, 5, 4); // law (NE)
+      placeIsland(CAREERS[2].x, CAREERS[2].y, 6, 5); // journalism (E-south)
+      placeIsland(CAREERS[3].x, CAREERS[3].y, 5, 4); // engineering (S-west)
+      placeIsland(CAREERS[4].x, CAREERS[4].y, 5, 4); // arts (SE)
+
+      // connect islands with paths/bridges (simple straight bridges)
+      function buildBridge(sx,sy,tx,ty){
+        const steps = Math.max(Math.abs(tx-sx), Math.abs(ty-sy));
+        for(let i=0;i<=steps;i++){
+          const t = i/steps; const x = Math.round(sx + (tx-sx)*t); const y = Math.round(sy + (ty-sy)*t);
+          if(world.map[y] && world.map[y][x] === 0) world.map[y][x] = 4; // bridge over water
+        }
+      }
+
+      // bridges from central island to each smaller island
+      buildBridge(cx, cy-4, CAREERS[1].x, CAREERS[1].y+2);
+      buildBridge(cx+6, cy+6, CAREERS[2].x-4, CAREERS[2].y);
+      buildBridge(cx-6, cy+8, CAREERS[3].x+4, CAREERS[3].y);
+      buildBridge(cx+10, cy+6, CAREERS[4].x-3, CAREERS[4].y-2);
+
+      // place shrines explicitly at career coords
+      CAREERS.forEach((c,idx)=>{
+        const tx=c.x, ty=c.y;
+        if(tx>1 && tx<MAP_W-1 && ty>1 && ty<MAP_H-1){
+          world.map[ty][tx] = 5;
+          // small plaza around shrine
+          [[1,0],[-1,0],[0,1],[0,-1]].forEach(([dx,dy])=>{ if(world.map[ty+dy] && world.map[ty+dy][tx+dx] !== 1) world.map[ty+dy][tx+dx] = 4; });
+        }
+      });
+
+      // 5) Scatter trees on grass (not on paths or shrines)
+      for(let y=2;y<MAP_H-2;y++){
+        for(let x=2;x<MAP_W-2;x++){
+          if(world.map[y][x] === 1 && Math.random() < 0.12){
+            world.map[y][x] = 3; // tree
+          }
+        }
+      }
+
+      // ensure player spawns on grass near central plaza
+      world.player.x = cx + 2; world.player.y = cy + 4;
+    }
+
+    // build map once
+    buildMap();
+
+    // camera calculations
+    function worldToPixel(tx, ty){ return {x: tx * TILE_SIZE, y: ty * TILE_SIZE}; }
+
+    // keyboard
+    const keys = {};
+    window.addEventListener('keydown', e => { keys[e.key] = true; if(e.key===' '){ interact(); } });
+    window.addEventListener('keyup', e => { keys[e.key] = false; });
+
+    // collisions: solid tiles are water(0) and tree(3)
+    function isSolid(tx,ty){ if(tx<0||ty<0||tx>=MAP_W||ty>=MAP_H) return true; const t = world.map[ty][tx]; return (t===0 || t===3); }
+
+    // interaction: if standing on a shrine tile, award badge
+    function interact(){ const px = world.player.x, py = world.player.y; const t = world.map[py][px]; if(t===5){ // find which career
+        const career = CAREERS.find(c=>c.x===px && c.y===py);
+        if(career){ world.badges.add(career.id); renderBadges(); document.getElementById('status').textContent = `Earned badge: ${career.title} ${career.emoji}`; }
+      }
+    }
+
+    // badges UI
+    function renderBadges(){ const shelf = document.getElementById('badgeShelf'); shelf.innerHTML=''; [...world.badges].forEach(id=>{
+      const c = CAREERS.find(x=>x.id===id); if(!c) return; const el=document.createElement('div'); el.className='badge'; el.textContent = c.emoji + ' ' + c.title; shelf.appendChild(el);
+    }); document.getElementById('count').textContent = world.badges.size + '/' + CAREERS.length; }
+
+    // draw functions
+    function drawTile(tid, dx, dy){ // dx,dy in pixels on canvas
+      if(drawFallback){
+        // simple colored rects for fallback
+        const colors = {0:'#1e3a66',1:'#2ea044',2:'#d9c27f',3:'#0a5d28',4:'#a57e4a',5:'#c85a3a'};
+        ctx.fillStyle = colors[tid] || '#ff00ff'; ctx.fillRect(dx,dy,TILE_SIZE,TILE_SIZE); return;
+      }
+      const m = TILE_MAP[tid];
+      if(!m) return; // empty
+      ctx.drawImage(tileset, m.sx * TILE_SIZE, m.sy * TILE_SIZE, TILE_SIZE, TILE_SIZE, dx, dy, TILE_SIZE, TILE_SIZE);
+    }
+
+    // main render: draw visible portion of map centered on player
+    function render(){
+      // clear
+      ctx.clearRect(0,0,canvas.width,canvas.height);
+      // camera world pixel coords so player stays centered
+      const centerPx = world.player.x * TILE_SIZE + TILE_SIZE/2;
+      const centerPy = world.player.y * TILE_SIZE + TILE_SIZE/2;
+      const camLeft = Math.round(centerPx - canvas.width/2);
+      const camTop = Math.round(centerPy - canvas.height/2);
+
+      // draw tiles in view
+      const startCol = Math.floor(camLeft / TILE_SIZE);
+      const startRow = Math.floor(camTop / TILE_SIZE);
+      const cols = Math.ceil(canvas.width / TILE_SIZE) + 2;
+      const rows = Math.ceil(canvas.height / TILE_SIZE) + 2;
+
+      for(let r=0;r<rows;r++){
+        for(let c=0;c<cols;c++){
+          const tx = startCol + c; const ty = startRow + r;
+          const screenX = c * TILE_SIZE + (startCol * TILE_SIZE - camLeft) * -1 - TILE_SIZE/2;
+          const screenY = r * TILE_SIZE + (startRow * TILE_SIZE - camTop) * -1 - TILE_SIZE/2;
+          if(tx>=0 && ty>=0 && tx<MAP_W && ty<MAP_H){
+            const tid = world.map[ty][tx]; drawTile(tid, screenX, screenY);
+          } else {
+            // draw water for out-of-bounds
+            drawTile(0, screenX, screenY);
+          }
+        }
+      }
+
+      // draw player centered
+      const playerScreenX = Math.floor(canvas.width/2 - TILE_SIZE/2);
+      const playerScreenY = Math.floor(canvas.height/2 - TILE_SIZE/2 - 8);
+      drawPlayer(playerScreenX, playerScreenY);
+
+      // optional: draw career markers labels above shrines
+      CAREERS.forEach(c=>{
+        const sx = (c.x * TILE_SIZE) - camLeft; const sy = (c.y * TILE_SIZE) - camTop - 24;
+        // only draw if on screen
+        if(sx > -50 && sx < canvas.width + 50 && sy > -50 && sy < canvas.height + 50){
+          ctx.font = '14px sans-serif'; ctx.textAlign='center'; ctx.fillStyle = 'rgba(0,0,0,0.6)'; ctx.fillRect(sx-36,sy-14,72,20);
+          ctx.fillStyle = '#fff'; ctx.fillText(c.emoji + ' ' + c.title, sx, sy);
+        }
+      });
+    }
+
+    function drawPlayer(x,y){
+      // simple pixel player: head and body
+      // body
+      ctx.fillStyle = '#ffdca8'; ctx.fillRect(x, y+16, 32, 32);
+      // head
+      ctx.fillStyle = '#6b3f1b'; ctx.beginPath(); ctx.arc(x+16, y+8, 10, 0, Math.PI*2); ctx.fill();
+      // shadow
+      ctx.fillStyle = 'rgba(0,0,0,0.25)'; ctx.fillRect(x+6, y+48, 20, 4);
+    }
+
+    // update loop
+    let last = performance.now();
+    function update(now){
+      const dt = Math.min((now - last)/16.666, 3); last = now;
+      // movement: arrow keys / WASD
+      let dx=0, dy=0;
+      if(keys['ArrowUp']||keys['w']) dy=-1;
+      if(keys['ArrowDown']||keys['s']) dy=1;
+      if(keys['ArrowLeft']||keys['a']) dx=-1;
+      if(keys['ArrowRight']||keys['d']) dx=1;
+      if(dx!==0 && dy!==0){ dx*= Math.SQRT1_2; dy*= Math.SQRT1_2; }
+
+      // apply movement in tile units per tick
+      const moveSpeed = world.player.speed * dt * 0.12; // tuned speed
+      const newPx = world.player.x + Math.sign(dx) * Math.abs(dx) * moveSpeed;
+      const newPy = world.player.y + Math.sign(dy) * Math.abs(dy) * moveSpeed;
+
+      // we move player by pixels? our world grid is tile coords. We'll convert fractional positions allowed but collisions check integer tile where player center would be.
+      world.player.x += dx * moveSpeed;
+      world.player.y += dy * moveSpeed;
+
+      // clamp inside world
+      world.player.x = Math.max(0.5, Math.min(MAP_W-1.5, world.player.x));
+      world.player.y = Math.max(0.5, Math.min(MAP_H-1.5, world.player.y));
+
+      // collision: if player's current tile is solid, push back to previous integer safe tile
+      const checkTx = Math.round(world.player.x); const checkTy = Math.round(world.player.y);
+      if(isSolid(checkTx, checkTy)){
+        // revert movement
+        world.player.x -= dx * moveSpeed;
+        world.player.y -= dy * moveSpeed;
+      }
+
+      render();
+      requestAnimationFrame(update);
+    }
+
+    // start main loop after tileset loads (or immediately if fallback)
+    tileset.onload = ()=>{
+      drawFallback = false;
+      render();
+      last = performance.now();
+      requestAnimationFrame(update);
+    };
+    if(drawFallback){ render(); last = performance.now(); requestAnimationFrame(update); }
+
+    // reset & interactions
+    document.getElementById('btnReset').addEventListener('click', ()=>{ world.badges.clear(); renderBadges(); document.getElementById('status').textContent='Progress reset.'; buildMap(); });
+
+    // click on canvas to interact with shrine (or press space)
+    canvas.addEventListener('click', ()=> interact());
+
+    // render initial badges
+    function renderBadges(){ const shelf = document.getElementById('badgeShelf'); shelf.innerHTML=''; [...world.badges].forEach(id=>{ const c=CAREERS.find(x=>x.id===id); if(c){ const el=document.createElement('div'); el.className='badge'; el.textContent = c.emoji + ' ' + c.title; shelf.appendChild(el); } }); document.getElementById('count').textContent = world.badges.size + '/' + CAREERS.length; }
+
+    // expose for debugging
+    window.world = world; window.MAP=world.map;
+
+  </script>
+</body>
+</html>
